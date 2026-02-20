@@ -3,76 +3,102 @@ name: Build Pyrogram Docs as JSON
 on:
   push:
     branches: [dev]
-  workflow_dispatch: # Run manually from Actions tab anytime
+  workflow_dispatch:
 
 permissions:
-  contents: write # needed to push to docs-json branch
+  contents: write
 
 jobs:
   build-json-docs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout your fork ──────────────────────────────────────────────
-      - name: Checkout repository
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # ── 2. Python setup ────────────────────────────────────────────────────
-      - name: Set up Python 3.11
+      # ── 2. DEBUG: Print Makefile + compiler structure ──────────────────────
+      #    This tells us EXACTLY what the secret bash script does.
+      #    Check the Actions log after first run to understand the build.
+      - name: Debug - Print Makefile
+        run: |
+          echo "====== Makefile ======"
+          cat Makefile || echo "No Makefile found"
+
+      - name: Debug - List compiler/ directory
+        run: |
+          echo "====== compiler/ structure ======"
+          find compiler/ -type f | sort || echo "No compiler/ dir"
+          echo ""
+          echo "====== compiler scripts content ======"
+          find compiler/ -name "*.py" | xargs head -50 2>/dev/null || true
+
+      - name: Debug - List docs/source/ to see what RST files already exist
+        run: |
+          echo "====== docs/source/ structure ======"
+          find docs/source -type f | sort
+          echo ""
+          echo "====== api/methods exists? ======"
+          ls docs/source/api/methods/ 2>/dev/null | head -20 || echo "MISSING - needs compiler"
+
+      # ── 3. Python + deps ───────────────────────────────────────────────────
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
           cache: "pip"
 
-      # ── 3. Install the package itself (compiler scripts need it) ──────────
-      - name: Install pyrotgfork + Sphinx deps
+      - name: Install package + Sphinx
         run: |
           pip install --upgrade pip
-          # Install the package so compiler/ scripts can import pyrogram internals
           pip install -e . --quiet
-          # Sphinx + Furo theme (same theme the site uses)
           pip install sphinx furo sphinx-copybutton --quiet
 
-      # ── 4. Run the API compiler (generates .rst files from Python source) ─
-      #       Their compiler/ folder auto-generates RST stubs from the code.
-      #       We replicate what their Makefile does before building HTML.
-      - name: Generate RST from source (compiler step)
+      # ── 4. Run compiler scripts ────────────────────────────────────────────
+      #    Replicates what their secret TG_KAPG_DOCS_PBURL bash script does
+      - name: Run compiler - generate API RST files
         run: |
-          # Try the compiler scripts that auto-generate the API rst files
-          python -c "from compiler.api import compiler; compiler.start()" || true
-          python -c "from compiler.errors import compiler; compiler.start()" || true
-          echo "Compiler step done (errors above are non-fatal if RST files already exist)"
+          echo "=== Trying compiler scripts ==="
+          python compiler/api/compiler.py    2>&1 || true
+          python compiler/errors/compiler.py 2>&1 || true
+          python -m compiler.api             2>&1 || true
+          python -m compiler.errors          2>&1 || true
 
-      # ── 5. Build JSON instead of HTML ─────────────────────────────────────
+          echo "=== After compiler ==="
+          echo "api/methods/ files: $(find docs/source/api/methods/ -name '*.rst' 2>/dev/null | wc -l)"
+          echo "api/types/ files:   $(find docs/source/api/types/   -name '*.rst' 2>/dev/null | wc -l)"
+          echo "telegram/ files:    $(find docs/source/telegram/     -name '*.rst' 2>/dev/null | wc -l)"
+
+      - name: Try make (generates RST; ignore failures from missing secret deps)
+        run: make 2>&1 || true
+
+      # ── 5. Build JSON ──────────────────────────────────────────────────────
       - name: Build Sphinx JSON docs
         run: |
           sphinx-build \
             -b json \
             docs/source \
             docs/_build/json \
-            -q \
             -E \
             -D html_theme=furo
-          echo "Build complete. File count: $(find docs/_build/json -name '*.fjson' | wc -l) .fjson files"
+          echo "Total .fjson: $(find docs/_build/json -name '*.fjson' | wc -l)"
+          find docs/_build/json -name "*.fjson" | head -30
 
-      # ── 6. Show size comparison ────────────────────────────────────────────
-      - name: Report sizes
+      # ── 6. Size report ────────────────────────────────────────────────────
+      - name: Size report
         run: |
-          echo "=== JSON build size ==="
           du -sh docs/_build/json/
-          echo "=== Top 10 largest files ==="
           find docs/_build/json -name "*.fjson" -exec du -sh {} + | sort -rh | head -10
 
-      # ── 7. Create compressed archive ──────────────────────────────────────
-      - name: Package JSON output
+      # ── 7. Package + Upload ───────────────────────────────────────────────
+      - name: Package
         run: |
           cd docs/_build
           tar -czf pyrogram-docs-json.tar.gz json/
-          echo "Archive size: $(du -sh pyrogram-docs-json.tar.gz)"
+          echo "Archive: $(du -sh pyrogram-docs-json.tar.gz)"
 
-      # ── 8. Upload as downloadable artifact (available in Actions tab) ─────
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -80,14 +106,14 @@ jobs:
           path: docs/_build/pyrogram-docs-json.tar.gz
           retention-days: 90
 
-      # ── 9. Also push raw .fjson files to a dedicated branch ───────────────
-      #       So each file is directly accessible via raw URL, e.g.:
-      #       https://dishapatel010.github.io/pyrogram/api/methods/send_message.fjson
-      - name: Publish JSON to docs-json branch
+      # ── 8. Publish to docs-json branch ───────────────────────────────────
+      #    Files accessible at:
+      #    https://dishapatel010.github.io/pyrogram/api/methods/send_message.fjson
+      - name: Publish to docs-json branch
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: docs-json       # separate branch, won't touch gh-pages
+          publish_branch: docs-json
           publish_dir: docs/_build/json
           force_orphan: true
           commit_message: "docs: update JSON build [skip ci]"
