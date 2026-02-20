@@ -1,0 +1,93 @@
+name: Build Pyrogram Docs as JSON
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch: # Run manually from Actions tab anytime
+
+permissions:
+  contents: write # needed to push to docs-json branch
+
+jobs:
+  build-json-docs:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout your fork ──────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── 2. Python setup ────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. Install the package itself (compiler scripts need it) ──────────
+      - name: Install pyrotgfork + Sphinx deps
+        run: |
+          pip install --upgrade pip
+          # Install the package so compiler/ scripts can import pyrogram internals
+          pip install -e . --quiet
+          # Sphinx + Furo theme (same theme the site uses)
+          pip install sphinx furo sphinx-copybutton --quiet
+
+      # ── 4. Run the API compiler (generates .rst files from Python source) ─
+      #       Their compiler/ folder auto-generates RST stubs from the code.
+      #       We replicate what their Makefile does before building HTML.
+      - name: Generate RST from source (compiler step)
+        run: |
+          # Try the compiler scripts that auto-generate the API rst files
+          python -c "from compiler.api import compiler; compiler.start()" || true
+          python -c "from compiler.errors import compiler; compiler.start()" || true
+          echo "Compiler step done (errors above are non-fatal if RST files already exist)"
+
+      # ── 5. Build JSON instead of HTML ─────────────────────────────────────
+      - name: Build Sphinx JSON docs
+        run: |
+          sphinx-build \
+            -b json \
+            docs/source \
+            docs/_build/json \
+            -q \
+            -E \
+            -D html_theme=furo
+          echo "Build complete. File count: $(find docs/_build/json -name '*.fjson' | wc -l) .fjson files"
+
+      # ── 6. Show size comparison ────────────────────────────────────────────
+      - name: Report sizes
+        run: |
+          echo "=== JSON build size ==="
+          du -sh docs/_build/json/
+          echo "=== Top 10 largest files ==="
+          find docs/_build/json -name "*.fjson" -exec du -sh {} + | sort -rh | head -10
+
+      # ── 7. Create compressed archive ──────────────────────────────────────
+      - name: Package JSON output
+        run: |
+          cd docs/_build
+          tar -czf pyrogram-docs-json.tar.gz json/
+          echo "Archive size: $(du -sh pyrogram-docs-json.tar.gz)"
+
+      # ── 8. Upload as downloadable artifact (available in Actions tab) ─────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyrogram-docs-json
+          path: docs/_build/pyrogram-docs-json.tar.gz
+          retention-days: 90
+
+      # ── 9. Also push raw .fjson files to a dedicated branch ───────────────
+      #       So each file is directly accessible via raw URL, e.g.:
+      #       https://dishapatel010.github.io/pyrogram/api/methods/send_message.fjson
+      - name: Publish JSON to docs-json branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: docs-json       # separate branch, won't touch gh-pages
+          publish_dir: docs/_build/json
+          force_orphan: true
+          commit_message: "docs: update JSON build [skip ci]"
